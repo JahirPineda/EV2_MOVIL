@@ -1,0 +1,65 @@
+package cl.duoc.ui.theme
+
+import android.app.Activity
+import android.os.Build
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+
+private val DarkColorScheme = darkColorScheme(
+    primary = AzulPrincipal,
+    onPrimary = SuperficieBlanco,
+    primaryContainer = AzulOscuro,
+    onPrimaryContainer = AzulClaro,
+    secondary = AzulClaro,
+    onSecondary = AzulOscuro,
+    background = TextoPrincipal,
+    surface = Color(0xFF1E293B),
+    onSurface = SuperficieBlanco,
+    onBackground = SuperficieBlanco
+)
+
+private val LightColorScheme = lightColorScheme(
+    primary = AzulPrincipal,
+    onPrimary = SuperficieBlanco,
+    primaryContainer = AzulContainer,
+    onPrimaryContainer = AzulOscuro,
+    secondary = AzulOscuro,
+    onSecondary = SuperficieBlanco,
+    background = FondoClaro,
+    surface = SuperficieBlanco,
+    onBackground = TextoPrincipal,
+    onSurface = TextoPrincipal,
+    outline = BordeSuave,
+    surfaceVariant = FondoClaro,
+    onSurfaceVariant = TextoSecundario
+)
+
+@Composable
+fun BitacoraTheme(
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    dynamicColor: Boolean = false,
+    content: @Composable () -> Unit
+) {
+    val colorScheme = when {
+        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+            val context = LocalContext.current
+            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        }
+
+        darkTheme -> DarkColorScheme
+        else -> LightColorScheme
+    }
+
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = Typography,
+        content = content
+    )
+}
