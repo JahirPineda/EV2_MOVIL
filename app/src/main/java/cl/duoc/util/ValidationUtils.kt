@@ -8,9 +8,20 @@ import android.util.Patterns
  */
 object ValidationUtils {
 
+    private val EMAIL_REGEX = "^[A-Za-z0-9+_.-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$".toRegex()
+
     // Comprueba si el correo tiene un formato válido (ejemplo: usuario@correo.cl)
     fun esCorreoValido(correo: String): Boolean {
-        return correo.isNotBlank() && Patterns.EMAIL_ADDRESS.matcher(correo).matches()
+        if (correo.isBlank()) return false
+        return try {
+            if (Patterns.EMAIL_ADDRESS != null) {
+                Patterns.EMAIL_ADDRESS.matcher(correo).matches()
+            } else {
+                EMAIL_REGEX.matches(correo)
+            }
+        } catch (_: Throwable) {
+            EMAIL_REGEX.matches(correo)
+        }
     }
 
     // Comprueba que un texto no esté vacío y cumpla un largo mínimo

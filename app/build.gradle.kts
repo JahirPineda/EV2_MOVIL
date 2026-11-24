@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.kover)
 }
 
 android {
@@ -34,6 +35,9 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
 }
 
@@ -80,4 +84,19 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
+}
+
+kover {
+    reports {
+        filters {
+            includes {
+                classes(
+                    "cl.duoc.consumiendoapi.ui.form.ClienteValidator*",
+                    "cl.duoc.consumiendoapi.domain.usecase.CalcularEstadisticasUseCase*",
+                    "cl.duoc.util.ValidationUtils*",
+                    "cl.duoc.viewmodel.SeguimientoViewModel*"
+                )
+            }
+        }
+    }
 }
