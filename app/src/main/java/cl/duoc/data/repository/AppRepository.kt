@@ -1,49 +1,172 @@
 package cl.duoc.data.repository
 
+import android.util.Log
 import cl.duoc.data.dao.BitacoraDao
 import cl.duoc.data.dao.RegistroDao
 import cl.duoc.data.dao.UsuarioDao
 import cl.duoc.data.entity.BitacoraEntity
 import cl.duoc.data.entity.RegistroEntity
 import cl.duoc.data.entity.UsuarioEntity
+import cl.duoc.data.remote.*
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.firstOrNull
+import org.json.JSONObject
 
 /**
  * Repositorio central de datos de la aplicación.
- * Actúa como puente entre la base de datos (DAOs de Room) y los ViewModels.
+ * Integra la API REST de Spring Boot (Retrofit) con persistencia local (Room).
  */
 class AppRepository(
     private val usuarioDao: UsuarioDao,
     private val bitacoraDao: BitacoraDao,
-    private val registroDao: RegistroDao
+    private val registroDao: RegistroDao,
+    private val apiService: BitacoraApiService = RetrofitClient.apiService
 ) {
-    // ==========================================
-    // OPERACIONES DE USUARIOS
-    // ==========================================
-
-    // Busca un usuario por correo/RUT y contraseña para el login con respaldo de autoseed
-    suspend fun login(correo: String, pass: String): UsuarioEntity? {
-        var usuario = usuarioDao.login(correo, pass)
-        if (usuario == null && usuarioDao.contarUsuarios() == 0) {
-            cl.duoc.data.AppDatabase.poblarUsuariosIniciales(usuarioDao)
-            usuario = usuarioDao.login(correo, pass)
-        }
-        return usuario
+    companion object {
+        private const val TAG = "AppRepository"
     }
 
-    // Busca un usuario por su identificador (RUT)
+    private fun extraerMensajeError(errorBody: String?): String {
+        return try {
+            val json = JSONObject(errorBody ?: "")
+            json.optString("message", "Error en la solicitud al servidor")
+        } catch (e: Exception) {
+            "Error de comunicación con el servidor"
+        }
+    }
+
+    // ==========================================
+    // SINCRONIZACIÓN REMOTA DESDE SPRING BOOT
+    // ==========================================
+
+    /**
+     * Descarga usuarios, bitácoras y registros reales desde MySQL (Spring Boot)
+     * y actualiza la base local Room para reflejar los cambios en la UI.
+     */
+    suspend fun sincronizarDesdeServidor() {
+        try {
+            // 1. Sincronizar Usuarios primero (por las Foreign Keys de Room)
+            val respUsuarios = apiService.listarUsuarios()
+            if (respUsuarios.isSuccessful) {
+                respUsuarios.body()?.forEach { u ->
+                    usuarioDao.insertarUsuario(
+                        UsuarioEntity(
+                            id = u.id,
+                            rut = u.rut,
+                            nombre = u.nombre,
+                            correo = u.correo,
+                            contrasena = "",
+                            rol = u.rol,
+                            cursoAsignado = u.cursoAsignado,
+                            asignaturaAsignada = u.asignaturaAsignada
+                        )
+                    )
+                }
+            }
+
+            // 2. Sincronizar Bitácoras
+            val respBitacoras = apiService.listarBitacoras()
+            if (respBitacoras.isSuccessful) {
+                respBitacoras.body()?.forEach { b ->
+                    bitacoraDao.insertar(
+                        BitacoraEntity(
+                            id = b.id,
+                            titulo = b.titulo,
+                            descripcion = b.descripcion,
+                            fecha = b.fecha,
+                            curso = b.curso,
+                            estado = b.estado,
+                            docenteId = b.docenteId
+                        )
+                    )
+                }
+            }
+
+            // 3. Sincronizar Registros de Aprendizaje
+            val respRegistros = apiService.listarRegistros()
+            if (respRegistros.isSuccessful) {
+                respRegistros.body()?.forEach { r ->
+                    registroDao.insertar(
+                        RegistroEntity(
+                            id = r.id,
+                            bitacoraId = r.bitacoraId,
+                            estudianteId = r.estudianteId,
+                            observacion = r.observacion,
+                            fotoUri = r.fotoUri,
+                            fecha = r.fecha,
+                            estado = r.estado,
+                            retroalimentacionDocente = r.retroalimentacionDocente
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sincronizando con Spring Boot: ${e.message}")
+        }
+    }
+
+    // ==========================================
+    // OPERACIONES DE USUARIOS (AUTH + CRUD)
+    // ==========================================
+
+    suspend fun login(correo: String, pass: String): UsuarioEntity? {
+        try {
+            val response = apiService.login(LoginRequest(rut = correo.trim(), contrasena = pass))
+            if (response.isSuccessful && response.body() != null) {
+                val u = response.body()!!
+                val entity = UsuarioEntity(
+                    id = u.id,
+                    rut = u.rut,
+                    nombre = u.nombre,
+                    correo = u.correo,
+                    contrasena = pass,
+                    rol = u.rol,
+                    cursoAsignado = u.cursoAsignado,
+                    asignaturaAsignada = u.asignaturaAsignada
+                )
+                usuarioDao.insertarUsuario(entity)
+                // Al iniciar sesión, descargamos los datos actualizados desde MySQL
+                sincronizarDesdeServidor()
+                return entity
+            } else {
+                val msg = extraerMensajeError(response.errorBody()?.string())
+                Log.w(TAG, "Login rechazado por backend: $msg")
+                return null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Fallo de red en login, usando respaldo local Room: ${e.message}")
+            return usuarioDao.login(correo, pass)
+        }
+    }
+
     suspend fun obtenerUsuarioPorId(id: String): UsuarioEntity? {
         return usuarioDao.obtenerPorId(id)
     }
 
-    // Obtiene la lista completa de usuarios registrados
     fun obtenerTodosLosUsuarios(): Flow<List<UsuarioEntity>> {
         return usuarioDao.obtenerTodos()
     }
 
-    // Registra un nuevo usuario en la base de datos
     suspend fun insertarUsuario(usuario: UsuarioEntity) {
-        usuarioDao.insertarUsuario(usuario)
+        val response = apiService.registrarUsuario(
+            UsuarioCreateRequest(
+                rut = usuario.rut,
+                nombre = usuario.nombre,
+                correo = usuario.correo,
+                contrasena = usuario.contrasena,
+                rol = usuario.rol,
+                cursoAsignado = usuario.cursoAsignado,
+                asignaturaAsignada = usuario.asignaturaAsignada
+            )
+        )
+        if (response.isSuccessful && response.body() != null) {
+            val creado = response.body()!!
+            usuarioDao.insertarUsuario(
+                usuario.copy(id = creado.id, rut = creado.rut)
+            )
+        } else {
+            throw Exception(extraerMensajeError(response.errorBody()?.string()))
+        }
     }
 
     suspend fun actualizarUsuario(usuario: UsuarioEntity) {
@@ -55,7 +178,7 @@ class AppRepository(
     }
 
     // ==========================================
-    // OPERACIONES DE BITÁCORAS
+    // OPERACIONES DE BITÁCORAS (CRUD REMOTO + ROOM)
     // ==========================================
 
     fun obtenerBitacorasPorDocente(docenteId: String): Flow<List<BitacoraEntity>> {
@@ -66,33 +189,73 @@ class AppRepository(
         return bitacoraDao.obtenerPorEstado(estado)
     }
 
-    // Obtiene todas las bitácoras guardadas en Room
     fun obtenerTodasLasBitacoras(): Flow<List<BitacoraEntity>> {
         return bitacoraDao.obtenerTodas()
     }
 
-    // Busca una bitácora por su ID numérico
     suspend fun obtenerBitacoraPorId(id: Long): BitacoraEntity? {
         return bitacoraDao.obtenerPorId(id)
     }
 
-    // Cambia el estado de una bitácora (ej. a "CERRADA")
     suspend fun actualizarEstadoBitacora(id: Long, estado: String) {
-        bitacoraDao.actualizarEstado(id, estado)
+        val actual = bitacoraDao.obtenerPorId(id)
+        if (actual != null) {
+            actualizarBitacora(actual.copy(estado = estado))
+        } else {
+            bitacoraDao.actualizarEstado(id, estado)
+        }
     }
 
-    // Guarda una nueva bitácora creada por el docente
     suspend fun insertarBitacora(bitacora: BitacoraEntity): Long {
-        return bitacoraDao.insertar(bitacora)
+        val response = apiService.crearBitacora(
+            BitacoraCreateRequest(
+                titulo = bitacora.titulo,
+                descripcion = bitacora.descripcion,
+                fecha = bitacora.fecha,
+                curso = bitacora.curso,
+                estado = bitacora.estado,
+                docenteId = bitacora.docenteId
+            )
+        )
+        if (response.isSuccessful && response.body() != null) {
+            val remota = response.body()!!
+            val guardada = bitacora.copy(id = remota.id)
+            bitacoraDao.insertar(guardada)
+            return remota.id
+        } else {
+            throw Exception(extraerMensajeError(response.errorBody()?.string()))
+        }
     }
 
-    // Actualiza los datos de una bitácora existente
     suspend fun actualizarBitacora(bitacora: BitacoraEntity) {
-        bitacoraDao.actualizar(bitacora)
+        val response = apiService.editarBitacora(
+            id = bitacora.id,
+            request = BitacoraCreateRequest(
+                titulo = bitacora.titulo,
+                descripcion = bitacora.descripcion,
+                fecha = bitacora.fecha,
+                curso = bitacora.curso,
+                estado = bitacora.estado,
+                docenteId = bitacora.docenteId
+            )
+        )
+        if (response.isSuccessful) {
+            bitacoraDao.actualizar(bitacora)
+        } else {
+            throw Exception(extraerMensajeError(response.errorBody()?.string()))
+        }
     }
 
     suspend fun eliminarBitacora(bitacora: BitacoraEntity) {
-        bitacoraDao.eliminar(bitacora)
+        val response = apiService.eliminarBitacora(
+            id = bitacora.id,
+            docenteId = bitacora.docenteId
+        )
+        if (response.isSuccessful) {
+            bitacoraDao.eliminar(bitacora)
+        } else {
+            throw Exception(extraerMensajeError(response.errorBody()?.string()))
+        }
     }
 
     // ==========================================
@@ -103,42 +266,87 @@ class AppRepository(
         return registroDao.obtenerPorEstudianteYBitacora(bitacoraId, estudianteId)
     }
 
-    // Obtiene todos los aportes de estudiantes para una bitácora específica
     fun obtenerRegistrosPorBitacora(bitacoraId: Long): Flow<List<RegistroEntity>> {
         return registroDao.obtenerPorBitacora(bitacoraId)
     }
 
-    // Obtiene el historial de registros de un estudiante
     fun obtenerRegistrosPorEstudiante(estudianteId: String): Flow<List<RegistroEntity>> {
         return registroDao.obtenerPorEstudiante(estudianteId)
     }
 
-    // Obtiene todos los registros de todos los estudiantes
     fun obtenerTodosLosRegistros(): Flow<List<RegistroEntity>> {
         return registroDao.obtenerTodos()
     }
 
-    // Busca un registro específico por su ID
     suspend fun obtenerRegistroPorId(id: Long): RegistroEntity? {
         return registroDao.obtenerPorId(id)
     }
 
-    // El docente actualiza el estado (a REVISADO) y escribe su retroalimentación
     suspend fun actualizarRetroalimentacionYEstadoRegistro(id: Long, estado: String, retroalimentacion: String?) {
-        registroDao.actualizarRetroalimentacionYEstado(id, estado, retroalimentacion)
+        val registroActual = registroDao.obtenerPorId(id)
+        val bitacora = registroActual?.let { bitacoraDao.obtenerPorId(it.bitacoraId) }
+        val docenteId = bitacora?.docenteId ?: "11111111-1"
+
+        val response = apiService.revisarRegistro(
+            id = id,
+            request = RevisionRequest(
+                docenteId = docenteId,
+                estado = estado,
+                retroalimentacionDocente = retroalimentacion ?: ""
+            )
+        )
+        if (response.isSuccessful) {
+            registroDao.actualizarRetroalimentacionYEstado(id, estado, retroalimentacion)
+        } else {
+            throw Exception(extraerMensajeError(response.errorBody()?.string()))
+        }
     }
 
-    // Guarda un nuevo aporte de aprendizaje del estudiante
     suspend fun insertarRegistro(registro: RegistroEntity): Long {
-        return registroDao.insertar(registro)
+        val response = apiService.crearRegistro(
+            RegistroCreateRequest(
+                bitacoraId = registro.bitacoraId,
+                estudianteId = registro.estudianteId,
+                observacion = registro.observacion,
+                fotoUri = registro.fotoUri,
+                fecha = registro.fecha
+            )
+        )
+        if (response.isSuccessful && response.body() != null) {
+            val remoto = response.body()!!
+            val guardado = registro.copy(id = remoto.id, estado = remoto.estado)
+            registroDao.insertar(guardado)
+            return remoto.id
+        } else {
+            throw Exception(extraerMensajeError(response.errorBody()?.string()))
+        }
     }
 
-    // Actualiza un aporte de aprendizaje existente
     suspend fun actualizarRegistro(registro: RegistroEntity) {
-        registroDao.actualizar(registro)
+        val response = apiService.editarRegistroEstudiante(
+            id = registro.id,
+            request = RegistroUpdateRequest(
+                estudianteId = registro.estudianteId,
+                observacion = registro.observacion,
+                fotoUri = registro.fotoUri
+            )
+        )
+        if (response.isSuccessful) {
+            registroDao.actualizar(registro)
+        } else {
+            throw Exception(extraerMensajeError(response.errorBody()?.string()))
+        }
     }
 
     suspend fun eliminarRegistro(registro: RegistroEntity) {
-        registroDao.eliminar(registro)
+        val response = apiService.eliminarRegistro(
+            id = registro.id,
+            estudianteId = registro.estudianteId
+        )
+        if (response.isSuccessful) {
+            registroDao.eliminar(registro)
+        } else {
+            throw Exception(extraerMensajeError(response.errorBody()?.string()))
+        }
     }
 }
